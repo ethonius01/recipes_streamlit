@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import re
+from functools import lru_cache
 from typing import Any
 
 from pypdf import PdfReader
@@ -48,6 +49,13 @@ AMOUNT_PATTERN = re.compile(r"^(?:\d+|\d+\/\d+|\d+\.\d+)\b")
 
 def _ocr_available() -> bool:
     return all(dep is not None for dep in (np, pdfium, RapidOCR))
+
+
+@lru_cache(maxsize=1)
+def _get_ocr_engine() -> Any:
+    if not _ocr_available():
+        return None
+    return RapidOCR()
 
 
 def _clean_lines(text: str) -> list[str]:
@@ -121,19 +129,19 @@ def _extract_with_pdfplumber(data: bytes) -> tuple[str, str]:
     return text, "pdfplumber" if text else ""
 
 
-def _extract_with_ocr(data: bytes, max_pages: int = 3) -> tuple[str, str]:
-    if not _ocr_available():
+def _extract_with_ocr(data: bytes, max_pages: int = 2) -> tuple[str, str]:
+    engine = _get_ocr_engine()
+    if engine is None:
         return "", ""
     text_parts: list[str] = []
     try:
         doc = pdfium.PdfDocument(io.BytesIO(data))
-        ocr = RapidOCR()
         page_count = min(len(doc), max_pages)
         for page_index in range(page_count):
             page = doc[page_index]
             pil_image = page.render(scale=2.0).to_pil()
             arr = np.array(pil_image)
-            result, _ = ocr(arr)
+            result, _ = engine(arr)
             if result:
                 for line in result:
                     # RapidOCR returns tuples where index 1 is recognized text.
@@ -231,18 +239,21 @@ def extract_recipe_from_pdf(uploaded_file: Any) -> dict[str, Any]:
     text, method = _extract_with_pypdf(data)
     metadata_title = text if method == "pypdf-metadata" else ""
     warning = ""
+    diagnostics: list[str] = []
 
     if len(text.strip()) < 60:
         fallback_text, fallback_method = _extract_with_pdfplumber(data)
         if len(fallback_text.strip()) > len(text.strip()):
             text = fallback_text
             method = fallback_method or method
+            diagnostics.append("pdfplumber fallback used")
 
     if len(text.strip()) < 60:
         ocr_text, ocr_method = _extract_with_ocr(data)
         if len(ocr_text.strip()) > len(text.strip()):
             text = ocr_text
             method = ocr_method or method
+            diagnostics.append("OCR fallback used")
 
     if len(text.strip()) < 20:
         if method == "pypdf-metadata":
@@ -272,10 +283,14 @@ def extract_recipe_from_pdf(uploaded_file: Any) -> dict[str, Any]:
         # Keep short candidate lines as a best-effort fallback for manual correction.
         ingredients = [line for line in lines if len(line) <= 90][:10]
 
+    if diagnostics and method:
+        warning = warning or f"Extraction path: {method}. {'; '.join(diagnostics)}"
+
     return {
         "title": title,
         "ingredients": ingredients,
         "raw_text": text,
         "extraction_method": method,
         "warning": warning,
+        "diagnostics": diagnostics,
     }

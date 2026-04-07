@@ -141,6 +141,18 @@ def save_pdf_recipe(store: LocalStore, profile_id: str, candidate: dict[str, obj
     return recipe
 
 
+@st.cache_data(show_spinner=False)
+def parse_pdf_bytes(file_bytes: bytes) -> dict[str, object]:
+    class UploadedBytes:
+        def __init__(self, data: bytes):
+            self._data = data
+
+        def getvalue(self) -> bytes:
+            return self._data
+
+    return extract_recipe_from_pdf(UploadedBytes(file_bytes))
+
+
 store = get_store()
 profiles = get_profile_options(store)
 current_profile = active_profile(store)
@@ -350,7 +362,7 @@ with tab_memory:
         st.markdown("#### Add from PDF")
         uploaded_pdf = st.file_uploader("Upload a recipe PDF", type=["pdf"], key="recipe_pdf")
         if uploaded_pdf is not None:
-            candidate = extract_recipe_from_pdf(uploaded_pdf)
+            candidate = parse_pdf_bytes(uploaded_pdf.getvalue())
             st.session_state["pdf_candidate"] = candidate
         candidate = st.session_state.get("pdf_candidate")
         if candidate:
