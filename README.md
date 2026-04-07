@@ -23,3 +23,4 @@ streamlit run app.py
 
 - The app creates its local storage file on first run in `Food_Schedule_App/data/meal_planner_store.json`.
 - If Edamam credentials are not configured, the app still works with the saved recipe library.
+- OCR support for image-based PDFs needs Linux system libraries in `packages.txt` when running on Streamlit Community Cloud.
