@@ -8,25 +8,32 @@ from typing import Any
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
+
+IMPORT_ERRORS: dict[str, str] = {}
+
 try:
     import pdfplumber
-except Exception:  # pragma: no cover - optional fallback dependency
+except Exception as exc:  # pragma: no cover - optional fallback dependency
     pdfplumber = None
+    IMPORT_ERRORS["pdfplumber"] = str(exc)
 
 try:
     import numpy as np
-except Exception:  # pragma: no cover - optional OCR dependency
+except Exception as exc:  # pragma: no cover - optional OCR dependency
     np = None
+    IMPORT_ERRORS["numpy"] = str(exc)
 
 try:
     import pypdfium2 as pdfium
-except Exception:  # pragma: no cover - optional OCR dependency
+except Exception as exc:  # pragma: no cover - optional OCR dependency
     pdfium = None
+    IMPORT_ERRORS["pypdfium2"] = str(exc)
 
 try:
     from rapidocr_onnxruntime import RapidOCR
-except Exception:  # pragma: no cover - optional OCR dependency
+except Exception as exc:  # pragma: no cover - optional OCR dependency
     RapidOCR = None
+    IMPORT_ERRORS["rapidocr_onnxruntime"] = str(exc)
 
 
 SECTION_MARKERS = {"instructions", "directions", "method", "preparation", "steps", "notes"}
@@ -49,6 +56,17 @@ AMOUNT_PATTERN = re.compile(r"^(?:\d+|\d+\/\d+|\d+\.\d+)\b")
 
 def _ocr_available() -> bool:
     return all(dep is not None for dep in (np, pdfium, RapidOCR))
+
+
+def parser_capabilities() -> dict[str, Any]:
+    return {
+        "pdfplumber": pdfplumber is not None,
+        "numpy": np is not None,
+        "pypdfium2": pdfium is not None,
+        "rapidocr": RapidOCR is not None,
+        "ocr_available": _ocr_available(),
+        "import_errors": dict(IMPORT_ERRORS),
+    }
 
 
 @lru_cache(maxsize=1)
@@ -155,6 +173,20 @@ def _extract_with_ocr(data: bytes, max_pages: int = 2) -> tuple[str, str]:
     return text, "rapidocr" if text else ""
 
 
+def _text_quality_score(text: str, method: str) -> float:
+    value = text.strip()
+    if not value:
+        return -999.0
+    lines = _clean_lines(value)
+    ingredient_hits = sum(1 for line in lines if _looks_like_ingredient(_clean_ingredient_line(line)))
+    score = (len(lines) * 0.8) + (ingredient_hits * 4.0) + min(len(value) / 120.0, 8.0)
+    if method == "pypdf-metadata":
+        score -= 6.0
+    if method == "rapidocr":
+        score += 1.0
+    return score
+
+
 def _clean_ingredient_line(line: str) -> str:
     cleaned = re.sub(r"^[\-\u2022\*\s]+", "", line).strip()
     cleaned = re.sub(r"^[^\w\d\(\[]+", "", cleaned)
@@ -240,20 +272,40 @@ def extract_recipe_from_pdf(uploaded_file: Any) -> dict[str, Any]:
     metadata_title = text if method == "pypdf-metadata" else ""
     warning = ""
     diagnostics: list[str] = []
+    candidates: list[tuple[str, str]] = []
+    if text.strip():
+        candidates.append((text, method))
 
     if len(text.strip()) < 60:
         fallback_text, fallback_method = _extract_with_pdfplumber(data)
+        if fallback_text.strip():
+            candidates.append((fallback_text, fallback_method or "pdfplumber"))
         if len(fallback_text.strip()) > len(text.strip()):
             text = fallback_text
             method = fallback_method or method
             diagnostics.append("pdfplumber fallback used")
+        elif not fallback_text.strip():
+            diagnostics.append("pdfplumber returned no text")
 
     if len(text.strip()) < 60:
         ocr_text, ocr_method = _extract_with_ocr(data)
+        if ocr_text.strip():
+            candidates.append((ocr_text, ocr_method or "rapidocr"))
         if len(ocr_text.strip()) > len(text.strip()):
             text = ocr_text
             method = ocr_method or method
             diagnostics.append("OCR fallback used")
+        elif _ocr_available():
+            diagnostics.append("OCR returned no text")
+        else:
+            diagnostics.append("OCR unavailable in runtime")
+
+    if candidates:
+        best_text, best_method = max(candidates, key=lambda item: _text_quality_score(item[0], item[1]))
+        if (best_text, best_method) != (text, method):
+            text = best_text
+            method = best_method
+            diagnostics.append(f"selected best extraction: {best_method}")
 
     if len(text.strip()) < 20:
         if method == "pypdf-metadata":
@@ -271,6 +323,12 @@ def extract_recipe_from_pdf(uploaded_file: Any) -> dict[str, Any]:
                 "Could not detect readable text from this PDF even after OCR. "
                 "Please enter recipe details manually below."
             )
+
+    if not _ocr_available():
+        capabilities = parser_capabilities()
+        missing = [key for key, ok in capabilities.items() if key in {"numpy", "pypdfium2", "rapidocr"} and ok is False]
+        if missing:
+            diagnostics.append("missing OCR deps: " + ", ".join(sorted(missing)))
 
     lines = _clean_lines(text)
     title = _find_title(lines)

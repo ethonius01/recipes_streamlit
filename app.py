@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from pdf_ingest import extract_recipe_from_pdf
+from pdf_ingest import extract_recipe_from_pdf, parser_capabilities
 from recommendation import generate_week_plan
 from storage import LocalStore, now_iso, recipe_summary, slugify
 
@@ -371,6 +371,11 @@ with tab_memory:
                 st.caption(f"Extraction method: {candidate.get('extraction_method')}")
             if candidate.get("warning"):
                 st.warning(str(candidate.get("warning")))
+            diagnostics = candidate.get("diagnostics", [])
+            if diagnostics:
+                st.caption("Parser diagnostics: " + " | ".join(str(item) for item in diagnostics))
+            with st.expander("Parser runtime capabilities", expanded=False):
+                st.json(parser_capabilities())
             with st.form("pdf_recipe_form"):
                 pdf_name = st.text_input("Recipe name", value=str(candidate.get("title", "")))
                 pdf_category = st.text_input("Recipe type", value="imported")
