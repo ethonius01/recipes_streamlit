@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import re
+import shutil
 from functools import lru_cache
 from typing import Any
 
@@ -18,22 +19,16 @@ except Exception as exc:  # pragma: no cover - optional fallback dependency
     IMPORT_ERRORS["pdfplumber"] = str(exc)
 
 try:
-    import numpy as np
-except Exception as exc:  # pragma: no cover - optional OCR dependency
-    np = None
-    IMPORT_ERRORS["numpy"] = str(exc)
-
-try:
     import pypdfium2 as pdfium
 except Exception as exc:  # pragma: no cover - optional OCR dependency
     pdfium = None
     IMPORT_ERRORS["pypdfium2"] = str(exc)
 
 try:
-    from rapidocr_onnxruntime import RapidOCR
+    import pytesseract
 except Exception as exc:  # pragma: no cover - optional OCR dependency
-    RapidOCR = None
-    IMPORT_ERRORS["rapidocr_onnxruntime"] = str(exc)
+    pytesseract = None
+    IMPORT_ERRORS["pytesseract"] = str(exc)
 
 
 SECTION_MARKERS = {"instructions", "directions", "method", "preparation", "steps", "notes"}
@@ -55,15 +50,15 @@ AMOUNT_PATTERN = re.compile(r"^(?:\d+|\d+\/\d+|\d+\.\d+)\b")
 
 
 def _ocr_available() -> bool:
-    return all(dep is not None for dep in (np, pdfium, RapidOCR))
+    return all(dep is not None for dep in (pdfium, pytesseract)) and shutil.which("tesseract") is not None
 
 
 def parser_capabilities() -> dict[str, Any]:
     return {
         "pdfplumber": pdfplumber is not None,
-        "numpy": np is not None,
         "pypdfium2": pdfium is not None,
-        "rapidocr": RapidOCR is not None,
+        "pytesseract": pytesseract is not None,
+        "tesseract_binary": shutil.which("tesseract") is not None,
         "ocr_available": _ocr_available(),
         "import_errors": dict(IMPORT_ERRORS),
     }
@@ -73,7 +68,7 @@ def parser_capabilities() -> dict[str, Any]:
 def _get_ocr_engine() -> Any:
     if not _ocr_available():
         return None
-    return RapidOCR()
+    return pytesseract
 
 
 def _clean_lines(text: str) -> list[str]:
@@ -158,19 +153,13 @@ def _extract_with_ocr(data: bytes, max_pages: int = 2) -> tuple[str, str]:
         for page_index in range(page_count):
             page = doc[page_index]
             pil_image = page.render(scale=2.0).to_pil()
-            arr = np.array(pil_image)
-            result, _ = engine(arr)
-            if result:
-                for line in result:
-                    # RapidOCR returns tuples where index 1 is recognized text.
-                    if len(line) >= 2 and isinstance(line[1], str):
-                        value = line[1].strip()
-                        if value:
-                            text_parts.append(value)
+            ocr_text = engine.image_to_string(pil_image, config="--psm 6")
+            if ocr_text:
+                text_parts.append(ocr_text)
     except Exception:
         return "", ""
     text = "\n".join(text_parts).strip()
-    return text, "rapidocr" if text else ""
+    return text, "pytesseract" if text else ""
 
 
 def _text_quality_score(text: str, method: str) -> float:
@@ -182,7 +171,7 @@ def _text_quality_score(text: str, method: str) -> float:
     score = (len(lines) * 0.8) + (ingredient_hits * 4.0) + min(len(value) / 120.0, 8.0)
     if method == "pypdf-metadata":
         score -= 6.0
-    if method == "rapidocr":
+    if method == "pytesseract":
         score += 1.0
     return score
 
@@ -290,7 +279,7 @@ def extract_recipe_from_pdf(uploaded_file: Any) -> dict[str, Any]:
     if len(text.strip()) < 60:
         ocr_text, ocr_method = _extract_with_ocr(data)
         if ocr_text.strip():
-            candidates.append((ocr_text, ocr_method or "rapidocr"))
+            candidates.append((ocr_text, ocr_method or "pytesseract"))
         if len(ocr_text.strip()) > len(text.strip()):
             text = ocr_text
             method = ocr_method or method
@@ -326,7 +315,7 @@ def extract_recipe_from_pdf(uploaded_file: Any) -> dict[str, Any]:
 
     if not _ocr_available():
         capabilities = parser_capabilities()
-        missing = [key for key, ok in capabilities.items() if key in {"numpy", "pypdfium2", "rapidocr"} and ok is False]
+        missing = [key for key, ok in capabilities.items() if key in {"pypdfium2", "pytesseract", "tesseract_binary"} and ok is False]
         if missing:
             diagnostics.append("missing OCR deps: " + ", ".join(sorted(missing)))
 
